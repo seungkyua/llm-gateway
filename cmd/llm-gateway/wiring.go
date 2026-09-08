@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"path/filepath"
 	"time"
 
 	"github.com/gin-gonic/gin"
@@ -34,6 +35,10 @@ const (
 // filePermission matches storage.FileStore's (0600): log files may contain
 // operationally sensitive request metadata.
 const logFilePermission = 0o600
+
+// logDirPermission is used when auto-creating the parent directory of the
+// log file (e.g. "logs/") on first boot, mirroring storage's dataDirPermission.
+const logDirPermission = 0o700
 
 // buildEngine wires config + all internal/* components into one
 // *gin.Engine (spec.md 마일스톤 10). The returned cleanup func must be
@@ -138,6 +143,13 @@ func buildEngine(cfg *config.Config) (*gin.Engine, func(), error) {
 func openLogWriter(cfg *config.Config) (io.Writer, *os.File, error) {
 	if cfg.Logging.Output != logOutputFile {
 		return os.Stdout, nil, nil
+	}
+	// Fresh install / clean checkout: the parent directory (e.g. "logs/")
+	// is git-ignored and therefore does not exist yet. It must be created
+	// before the file itself so first boot succeeds without any manual
+	// "mkdir logs" step (spec.md data model note, symmetric with data/).
+	if err := os.MkdirAll(filepath.Dir(cfg.Logging.FilePath), logDirPermission); err != nil {
+		return nil, nil, fmt.Errorf("wiring: failed to create log directory for %q: %w", cfg.Logging.FilePath, err)
 	}
 	f, err := os.OpenFile(cfg.Logging.FilePath, os.O_APPEND|os.O_CREATE|os.O_WRONLY, logFilePermission)
 	if err != nil {

@@ -165,3 +165,33 @@ func TestNewFileStoreShouldCreateFilesWithPermission0600WhenFilesDoNotExist(t *t
 		}
 	}
 }
+
+// TestNewFileStoreShouldCreateParentDirectoryWhenItDoesNotExist reproduces
+// a clean-checkout first boot: the parent directory ("data/") is not
+// pre-created (unlike t.TempDir(), which always already exists), so
+// NewFileStore itself must MkdirAll it before writing keys.json/usage.json.
+func TestNewFileStoreShouldCreateParentDirectoryWhenItDoesNotExist(t *testing.T) {
+	base := t.TempDir()
+	// "data" is a nested subdirectory that does not exist yet under base.
+	dataDir := filepath.Join(base, "data")
+	keysPath := filepath.Join(dataDir, "keys.json")
+	usagePath := filepath.Join(dataDir, "usage.json")
+
+	if _, err := os.Stat(dataDir); !os.IsNotExist(err) {
+		t.Fatalf("precondition failed: dataDir %q must not exist yet", dataDir)
+	}
+
+	if _, err := NewFileStore(keysPath, usagePath); err != nil {
+		t.Fatalf("NewFileStore failed when parent directory did not exist: %v", err)
+	}
+
+	for _, p := range []string{keysPath, usagePath} {
+		info, err := os.Stat(p)
+		if err != nil {
+			t.Fatalf("expected file %q to exist after auto-creating parent dir: %v", p, err)
+		}
+		if perm := info.Mode().Perm(); perm != 0o600 {
+			t.Errorf("expected 0600 permission for %q, got %v", p, perm)
+		}
+	}
+}

@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
+	"path/filepath"
 	"sync"
 	"time"
 )
@@ -12,6 +13,11 @@ import (
 // filePermission is used for both keys.json and usage.json since they hold
 // sensitive data (key hashes, usage figures).
 const filePermission = 0o600
+
+// dataDirPermission is used when auto-creating the parent directory of
+// keys.json/usage.json (e.g. "data/") on first boot, since it too may hold
+// sensitive files.
+const dataDirPermission = 0o700
 
 // FileStore is a JSON-file-backed implementation of Store. It keeps an
 // in-memory copy for fast reads and rewrites the whole file on every
@@ -59,6 +65,13 @@ func ensureJSONFile(path string, emptyContent []byte) error {
 		// externally with a wider mode.
 		return os.Chmod(path, filePermission)
 	} else if !os.IsNotExist(err) {
+		return err
+	}
+	// Fresh install / clean checkout: the parent directory (e.g. "data/")
+	// is git-ignored and therefore does not exist yet. It must be created
+	// before the file itself so first boot succeeds without any manual
+	// "mkdir data" step.
+	if err := os.MkdirAll(filepath.Dir(path), dataDirPermission); err != nil {
 		return err
 	}
 	return os.WriteFile(path, emptyContent, filePermission)

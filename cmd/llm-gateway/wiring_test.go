@@ -358,3 +358,50 @@ func TestPanicRecoveryShouldReturn500InsteadOfCrashing(t *testing.T) {
 		t.Fatalf("expected 500, got %d", w.Code)
 	}
 }
+
+// TestBuildEngineShouldStartWhenDataAndLogsParentDirectoriesDoNotExist
+// reproduces a clean-checkout first boot end-to-end: neither "data/" nor
+// "logs/" exists yet under the base temp dir (spec.md 인수 기준 27a).
+// buildEngine must succeed without requiring the caller to mkdir first,
+// and the state/log files it creates must end up with 0600 permission.
+func TestBuildEngineShouldStartWhenDataAndLogsParentDirectoriesDoNotExist(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	backend := newMockVLLM(t)
+	defer backend.Close()
+
+	base := t.TempDir()
+	cfg := testConfig(t, backend.URL)
+	cfg.Storage.KeysFile = filepath.Join(base, "data", "keys.json")
+	cfg.Storage.UsageFile = filepath.Join(base, "data", "usage.json")
+	cfg.Logging.Output = "file"
+	cfg.Logging.FilePath = filepath.Join(base, "logs", "gateway.log")
+
+	if _, err := os.Stat(filepath.Join(base, "data")); !os.IsNotExist(err) {
+		t.Fatalf("precondition failed: data dir must not exist yet")
+	}
+	if _, err := os.Stat(filepath.Join(base, "logs")); !os.IsNotExist(err) {
+		t.Fatalf("precondition failed: logs dir must not exist yet")
+	}
+
+	r, cleanup, err := buildEngine(cfg)
+	if err != nil {
+		t.Fatalf("buildEngine failed when data/logs parent dirs were missing: %v", err)
+	}
+	defer cleanup()
+
+	w := httptest.NewRecorder()
+	r.ServeHTTP(w, httptest.NewRequest(http.MethodGet, "/healthz", nil))
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200 from /healthz, got %d", w.Code)
+	}
+
+	for _, p := range []string{cfg.Storage.KeysFile, cfg.Storage.UsageFile, cfg.Logging.FilePath} {
+		info, err := os.Stat(p)
+		if err != nil {
+			t.Fatalf("expected %q to be auto-created: %v", p, err)
+		}
+		if perm := info.Mode().Perm(); perm != 0o600 {
+			t.Errorf("expected 0600 permission for %q, got %v", p, perm)
+		}
+	}
+}
