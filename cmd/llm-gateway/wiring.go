@@ -199,7 +199,13 @@ func makeOnComplete(tl *tokenlimit.Checker, rl *ratelimit.Limiter, logger *metri
 
 func countTokens(method string, res proxy.Result) (promptTokens, completionTokens int) {
 	if method == tokencount.MethodTokenizer {
-		return tokencount.CountApprox(string(res.RequestBody)), tokencount.CountApprox(string(res.ResponseBody))
+		// Only the actual prompt/completion text (messages[].content or
+		// prompt / choices[].message.content or choices[].text) is
+		// counted, not the raw request/response JSON, so JSON field
+		// names/punctuation/unrelated fields don't inflate quota or TPM
+		// accounting (spec.md 마일스톤 9, 인수 기준 21).
+		return tokencount.CountApprox(tokencount.ExtractRequestText(res.RequestBody)),
+			tokencount.CountApprox(tokencount.ExtractResponseText(res.ResponseBody))
 	}
 	usage, ok := tokencount.FromUsageField(res.ResponseBody)
 	if !ok {

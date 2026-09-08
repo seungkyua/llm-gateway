@@ -314,6 +314,62 @@ func TestEndToEndShouldWriteJSONLogEntryWithRequiredFieldsAndNoSensitiveData(t *
 	}
 }
 
+// TestEndToEndShouldCountTokenizerTokensFromMessageContentNotJSONOverhead
+// verifies spec.md 인수 기준 21: token_counting.method=tokenizer must count
+// only messages[].content text, not the surrounding request/response JSON
+// (field names like "model"/"role", punctuation, unrelated fields). Two
+// requests with identical message content but very different amounts of
+// JSON overhead around it must produce the same logged prompt_tokens.
+func TestEndToEndShouldCountTokenizerTokensFromMessageContentNotJSONOverhead(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	backend := newMockVLLM(t)
+	defer backend.Close()
+
+	countPromptTokensFor := func(body string) int {
+		t.Helper()
+		cfg := testConfig(t, backend.URL)
+		cfg.TokenCounting.Method = "tokenizer"
+		r, cleanup, err := buildEngine(cfg)
+		if err != nil {
+			t.Fatalf("buildEngine failed: %v", err)
+		}
+
+		apiKey := issueAdminKey(t, r, cfg.Admin.Token)
+
+		req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", bytes.NewBufferString(body))
+		req.Header.Set("Authorization", "Bearer "+apiKey)
+		w := httptest.NewRecorder()
+		r.ServeHTTP(w, req)
+		if w.Code != http.StatusOK {
+			t.Fatalf("expected 200, got %d: %s", w.Code, w.Body.String())
+		}
+		cleanup()
+
+		raw, err := os.ReadFile(cfg.Logging.FilePath)
+		if err != nil {
+			t.Fatalf("failed to read log file: %v", err)
+		}
+		var parsed map[string]any
+		if err := json.Unmarshal(raw, &parsed); err != nil {
+			t.Fatalf("invalid JSON log line: %v: %s", err, raw)
+		}
+		return int(parsed["prompt_tokens"].(float64))
+	}
+
+	plainBody := `{"model":"m","messages":[{"role":"user","content":"one two three four five"}]}`
+	jsonHeavyBody := `{"model":"m","messages":[{"role":"user","content":"one two three four five"}],"metadata":{"note":"this unrelated field has many extra words that must not be counted as tokens"}}`
+
+	plainCount := countPromptTokensFor(plainBody)
+	heavyCount := countPromptTokensFor(jsonHeavyBody)
+
+	if plainCount != 5 {
+		t.Errorf("expected 5 tokens counted from message content alone, got %d", plainCount)
+	}
+	if plainCount != heavyCount {
+		t.Errorf("expected JSON overhead to not affect tokenizer token count, got plain=%d heavy=%d", plainCount, heavyCount)
+	}
+}
+
 func TestEndToEndShouldReturn503WhenAllBackendsUnhealthy(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 	cfg := testConfig(t, "http://127.0.0.1:1") // nothing listens here -> health check fails
