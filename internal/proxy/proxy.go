@@ -177,17 +177,29 @@ func (p *Proxy) relayNonStream(c *gin.Context, resp *http.Response, contentType,
 // sseEventDelimiter separates SSE events (a blank line).
 var sseEventDelimiter = []byte("\n\n")
 
+// errIncompleteSSEEvent signals that the stream ended (EOF, whether from a
+// hard disconnect or a graceful peer close) while an SSE event was still
+// buffered without its closing blank-line delimiter. splitSSEEvents
+// surfaces it via bufio.Scanner.Err() so relayStream can treat "closed with
+// an unfinished event" the same as "connection dropped" (spec.md 마일스톤
+// 8, 인수 기준 19: TCP RST와 미완결 상태의 graceful close를 동일하게 취급).
+var errIncompleteSSEEvent = errors.New("proxy: backend closed connection with an incomplete SSE event buffered")
+
 // splitSSEEvents is a bufio.SplitFunc that tokenizes on blank-line-separated
-// SSE events instead of individual lines.
+// SSE events instead of individual lines. If the stream ends (EOF) while
+// leftover bytes remain that never reached a closing blank line, that is
+// treated as an error (errIncompleteSSEEvent) rather than a valid final
+// event — regardless of whether the EOF came from a hard disconnect (TCP
+// RST) or the peer closing the connection gracefully (FIN) mid-event.
 func splitSSEEvents(data []byte, atEOF bool) (advance int, token []byte, err error) {
-	if atEOF && len(data) == 0 {
-		return 0, nil, nil
-	}
 	if i := bytes.Index(data, sseEventDelimiter); i >= 0 {
 		return i + len(sseEventDelimiter), data[0:i], nil
 	}
 	if atEOF {
-		return len(data), data, nil
+		if len(data) > 0 {
+			return 0, nil, errIncompleteSSEEvent
+		}
+		return 0, nil, nil
 	}
 	return 0, nil, nil
 }

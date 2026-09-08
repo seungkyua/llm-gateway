@@ -290,3 +290,121 @@ func TestHandlerShouldSendErrorEventAfterPartialChunksWhenConnectionDropsMidStre
 		t.Errorf("expected an error event to terminate the stream, got %s", w.Body.String())
 	}
 }
+
+// TestHandlerShouldSendErrorEventWhenBackendGracefullyClosesWithIncompleteEventBuffered
+// covers spec.md 인수 기준 19's second disconnect scenario: the backend does
+// not RST, it closes the connection normally (plain net.Conn.Close, a
+// graceful FIN) while an SSE event is still incomplete in the buffer (no
+// closing blank line). The gateway must treat this the same as a hard
+// disconnect: relay what was already sent, then terminate with an error
+// event, not silently return the incomplete bytes as if they were a
+// complete final event.
+func TestHandlerShouldSendErrorEventWhenBackendGracefullyClosesWithIncompleteEventBuffered(t *testing.T) {
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("failed to listen: %v", err)
+	}
+	go func() {
+		conn, err := ln.Accept()
+		if err != nil {
+			return
+		}
+		defer conn.Close()
+		reader := bufio.NewReader(conn)
+		for {
+			line, err := reader.ReadString('\n')
+			if err != nil || line == "\r\n" {
+				break
+			}
+		}
+		// No Content-Length / no chunked encoding: the body is delimited
+		// by the connection closing (Connection: close), same as a real
+		// server whose process exits normally mid-response.
+		conn.Write([]byte("HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nConnection: close\r\n\r\n"))
+		conn.Write([]byte("data: {\"chunk\":0}\n\n"))
+		conn.Write([]byte("data: {\"chunk\":1}")) // no trailing blank line: incomplete
+		// conn.Close() below is a plain, graceful close (no SO_LINGER
+		// trick) -> a FIN, not an RST.
+	}()
+	backendURL := "http://" + ln.Addr().String()
+	defer ln.Close()
+
+	r := newTestRouter(t, backendURL)
+
+	req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", bytes.NewBufferString(`{"model":"m","stream":true}`))
+	w := httptest.NewRecorder()
+
+	done := make(chan struct{})
+	go func() {
+		r.ServeHTTP(w, req)
+		close(done)
+	}()
+
+	select {
+	case <-done:
+	case <-time.After(5 * time.Second):
+		t.Fatal("handler did not return after backend gracefully closed mid-event (possible hang)")
+	}
+
+	if !strings.Contains(w.Body.String(), "chunk\":0") {
+		t.Errorf("expected the complete first chunk to be preserved, got %s", w.Body.String())
+	}
+	if !strings.Contains(w.Body.String(), "event: error") {
+		t.Errorf("expected an error event when the connection closed with an incomplete buffered event, got %s", w.Body.String())
+	}
+}
+
+// TestHandlerShouldTerminateNormallyWithoutErrorEventWhenBackendClosesAfterCompleteFinalEvent
+// covers the opposite side of 인수 기준 19: if the backend sends a complete,
+// properly-delimited final event (e.g. "[DONE]") and only then closes the
+// connection normally, that is a clean stream end and must NOT produce an
+// error event.
+func TestHandlerShouldTerminateNormallyWithoutErrorEventWhenBackendClosesAfterCompleteFinalEvent(t *testing.T) {
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("failed to listen: %v", err)
+	}
+	go func() {
+		conn, err := ln.Accept()
+		if err != nil {
+			return
+		}
+		defer conn.Close()
+		reader := bufio.NewReader(conn)
+		for {
+			line, err := reader.ReadString('\n')
+			if err != nil || line == "\r\n" {
+				break
+			}
+		}
+		conn.Write([]byte("HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nConnection: close\r\n\r\n"))
+		conn.Write([]byte("data: {\"chunk\":0}\n\n"))
+		conn.Write([]byte("data: [DONE]\n\n")) // complete, properly terminated
+	}()
+	backendURL := "http://" + ln.Addr().String()
+	defer ln.Close()
+
+	r := newTestRouter(t, backendURL)
+
+	req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", bytes.NewBufferString(`{"model":"m","stream":true}`))
+	w := httptest.NewRecorder()
+
+	done := make(chan struct{})
+	go func() {
+		r.ServeHTTP(w, req)
+		close(done)
+	}()
+
+	select {
+	case <-done:
+	case <-time.After(5 * time.Second):
+		t.Fatal("handler did not return after backend closed cleanly (possible hang)")
+	}
+
+	if !strings.Contains(w.Body.String(), "[DONE]") {
+		t.Errorf("expected the [DONE] event to be relayed, got %s", w.Body.String())
+	}
+	if strings.Contains(w.Body.String(), "event: error") {
+		t.Errorf("expected no error event when the backend sent a complete final event before closing, got %s", w.Body.String())
+	}
+}
