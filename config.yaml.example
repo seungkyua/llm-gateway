@@ -1,0 +1,36 @@
+server:
+  listen_addr: ":8080"
+
+admin:
+  token: "${ADMIN_TOKEN}"   # 환경변수 주입, 하드코딩 금지
+
+backends:
+  - url: "http://vllm-1:8000"
+  - url: "http://vllm-2:8000"
+
+load_balancer:
+  strategy: "round_robin_healthcheck"   # round_robin_healthcheck | least_requests
+  health_check_interval: "5s"
+
+rate_limit:
+  default:
+    rpm: 60
+    tpm: 100000
+
+token_limit:
+  default:
+    max_tokens_per_request: 4096
+    quota_period: "monthly"
+    quota_tokens: 1000000
+
+token_counting:
+  method: "usage_field"   # usage_field | tokenizer
+
+storage:
+  keys_file: "./data/keys.json"
+  usage_file: "./data/usage.json"
+
+logging:
+  format: "json"          # json | text
+  output: "stdout"        # stdout | file
+  file_path: "./logs/llm-gateway.log"
