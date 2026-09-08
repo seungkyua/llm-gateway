@@ -39,17 +39,49 @@ func NewHTTPClient() *http.Client {
 	}
 }
 
+// Result summarizes one completed proxy call for metrics/logging purposes
+// (see internal/metrics). ResponseBody is only populated for non-streaming
+// responses (streaming bodies are relayed incrementally and never fully
+// buffered).
+type Result struct {
+	BackendURL   string
+	Status       int
+	Stream       bool
+	RequestBody  []byte
+	ResponseBody []byte
+	Start        time.Time
+	ChunkTimes   []time.Time
+	End          time.Time
+}
+
 // Proxy relays proxy API requests to a backend selected by a
 // loadbalancer.LoadBalancer.
 type Proxy struct {
-	lb     *loadbalancer.LoadBalancer
-	client *http.Client
+	lb         *loadbalancer.LoadBalancer
+	client     *http.Client
+	onComplete func(*gin.Context, Result)
+}
+
+// Option configures optional Proxy behavior.
+type Option func(*Proxy)
+
+// WithOnComplete registers a callback invoked synchronously, after the
+// response has been fully relayed to the client, with details needed for
+// token counting/metrics/logging (internal/tokencount, internal/metrics).
+// The gin.Context lets the caller read values set by earlier middleware
+// (e.g. the authenticated key record, a request id).
+func WithOnComplete(fn func(*gin.Context, Result)) Option {
+	return func(p *Proxy) { p.onComplete = fn }
 }
 
 // New builds a Proxy. client is injected (not created internally) so
 // callers control timeouts/transport configuration.
-func New(lb *loadbalancer.LoadBalancer, client *http.Client) *Proxy {
-	return &Proxy{lb: lb, client: client}
+func New(lb *loadbalancer.LoadBalancer, client *http.Client, opts ...Option) *Proxy {
+	p := &Proxy{lb: lb, client: client}
+	for _, opt := range opts {
+		opt(p)
+	}
+	return p
 }
 
 // Handler returns a gin.HandlerFunc that proxies the current request.
@@ -97,6 +129,8 @@ func (p *Proxy) serve(c *gin.Context) {
 	backend.IncInFlight()
 	defer backend.DecInFlight()
 
+	start := time.Now()
+
 	resp, err := p.client.Do(req)
 	if err != nil {
 		apierror.Abort(c, http.StatusBadGateway, "backend request failed", apierror.TypeAPIError, apierror.CodeBadGateway)
@@ -106,13 +140,13 @@ func (p *Proxy) serve(c *gin.Context) {
 
 	respContentType := resp.Header.Get("Content-Type")
 	if strings.Contains(respContentType, "text/event-stream") {
-		relayStream(c, resp)
+		p.relayStream(c, resp, backend.URL, body, start)
 		return
 	}
-	relayNonStream(c, resp, respContentType)
+	p.relayNonStream(c, resp, respContentType, backend.URL, body, start)
 }
 
-func relayNonStream(c *gin.Context, resp *http.Response, contentType string) {
+func (p *Proxy) relayNonStream(c *gin.Context, resp *http.Response, contentType, backendURL string, requestBody []byte, start time.Time) {
 	bodyBytes, err := io.ReadAll(resp.Body)
 	if err != nil {
 		apierror.Abort(c, http.StatusBadGateway, "failed to read backend response", apierror.TypeAPIError, apierror.CodeBadGateway)
@@ -126,6 +160,18 @@ func relayNonStream(c *gin.Context, resp *http.Response, contentType string) {
 		contentType = "application/json"
 	}
 	c.Data(resp.StatusCode, contentType, bodyBytes)
+
+	if p.onComplete != nil {
+		p.onComplete(c, Result{
+			BackendURL:   backendURL,
+			Status:       resp.StatusCode,
+			Stream:       false,
+			RequestBody:  requestBody,
+			ResponseBody: bodyBytes,
+			Start:        start,
+			End:          time.Now(),
+		})
+	}
 }
 
 // sseEventDelimiter separates SSE events (a blank line).
@@ -146,7 +192,7 @@ func splitSSEEvents(data []byte, atEOF bool) (advance int, token []byte, err err
 	return 0, nil, nil
 }
 
-func relayStream(c *gin.Context, resp *http.Response) {
+func (p *Proxy) relayStream(c *gin.Context, resp *http.Response, backendURL string, requestBody []byte, start time.Time) {
 	c.Header("Content-Type", "text/event-stream")
 	c.Header("Cache-Control", "no-cache")
 	c.Status(resp.StatusCode)
@@ -157,6 +203,7 @@ func relayStream(c *gin.Context, resp *http.Response) {
 	scanner.Buffer(make([]byte, 0, 64*1024), 1024*1024)
 	scanner.Split(splitSSEEvents)
 
+	var chunkTimes []time.Time
 	for scanner.Scan() {
 		event := scanner.Bytes()
 		if len(event) == 0 {
@@ -167,6 +214,7 @@ func relayStream(c *gin.Context, resp *http.Response) {
 		if canFlush {
 			flusher.Flush()
 		}
+		chunkTimes = append(chunkTimes, time.Now())
 	}
 
 	if err := scanner.Err(); err != nil && !errors.Is(err, io.EOF) {
@@ -180,5 +228,17 @@ func relayStream(c *gin.Context, resp *http.Response) {
 		if canFlush {
 			flusher.Flush()
 		}
+	}
+
+	if p.onComplete != nil {
+		p.onComplete(c, Result{
+			BackendURL:  backendURL,
+			Status:      resp.StatusCode,
+			Stream:      true,
+			RequestBody: requestBody,
+			Start:       start,
+			ChunkTimes:  chunkTimes,
+			End:         time.Now(),
+		})
 	}
 }

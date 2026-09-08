@@ -162,6 +162,78 @@ func TestHandlerShouldRelayAllSSEChunksAndSetEventStreamContentTypeWhenStreaming
 	}
 }
 
+func TestHandlerShouldInvokeOnCompleteWithResponseDetailsWhenNonStreaming(t *testing.T) {
+	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusOK)
+		w.Write([]byte(`{"id":"chatcmpl-1","usage":{"prompt_tokens":10,"completion_tokens":5}}`))
+	}))
+	defer backend.Close()
+
+	b := loadbalancer.NewBackend(backend.URL)
+	b.SetStatus(loadbalancer.Healthy)
+	lb := loadbalancer.New([]*loadbalancer.Backend{b}, &loadbalancer.RoundRobinHealthcheck{})
+
+	var got Result
+	p := New(lb, &http.Client{}, WithOnComplete(func(c *gin.Context, r Result) {
+		got = r
+	}))
+	r := gin.New()
+	r.POST("/v1/chat/completions", p.Handler())
+
+	req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", bytes.NewBufferString(`{"model":"m"}`))
+	w := httptest.NewRecorder()
+	r.ServeHTTP(w, req)
+
+	if got.Status != http.StatusOK {
+		t.Errorf("expected onComplete Status 200, got %d", got.Status)
+	}
+	if got.Stream {
+		t.Error("expected Stream=false for non-streaming response")
+	}
+	if !strings.Contains(string(got.ResponseBody), "chatcmpl-1") {
+		t.Errorf("expected onComplete ResponseBody to contain response, got %s", got.ResponseBody)
+	}
+	if got.BackendURL != backend.URL {
+		t.Errorf("expected BackendURL %q, got %q", backend.URL, got.BackendURL)
+	}
+}
+
+func TestHandlerShouldInvokeOnCompleteWithChunkTimesWhenStreaming(t *testing.T) {
+	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		w.WriteHeader(http.StatusOK)
+		flusher := w.(http.Flusher)
+		for i := 0; i < 3; i++ {
+			w.Write([]byte("data: {}\n\n"))
+			flusher.Flush()
+		}
+	}))
+	defer backend.Close()
+
+	b := loadbalancer.NewBackend(backend.URL)
+	b.SetStatus(loadbalancer.Healthy)
+	lb := loadbalancer.New([]*loadbalancer.Backend{b}, &loadbalancer.RoundRobinHealthcheck{})
+
+	var got Result
+	p := New(lb, &http.Client{}, WithOnComplete(func(c *gin.Context, r Result) {
+		got = r
+	}))
+	r := gin.New()
+	r.POST("/v1/chat/completions", p.Handler())
+
+	req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", bytes.NewBufferString(`{"model":"m","stream":true}`))
+	w := httptest.NewRecorder()
+	r.ServeHTTP(w, req)
+
+	if !got.Stream {
+		t.Error("expected Stream=true for streaming response")
+	}
+	if len(got.ChunkTimes) != 3 {
+		t.Errorf("expected 3 chunk arrival times, got %d", len(got.ChunkTimes))
+	}
+}
+
 // TestHandlerShouldSendErrorEventAfterPartialChunksWhenConnectionDropsMidStream
 // uses a raw TCP listener (rather than httptest.Server) so we can hijack and
 // abruptly close the connection mid-response, simulating a backend crash
