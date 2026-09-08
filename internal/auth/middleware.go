@@ -56,3 +56,11 @@ func KeyRecordFromContext(c *gin.Context) (storage.KeyRecord, bool) {
 	rec, ok := v.(storage.KeyRecord)
 	return rec, ok
 }
+
+// SetKeyRecord stores rec in c the same way Middleware does. It is the
+// setter counterpart to KeyRecordFromContext, intended for other packages
+// (and their tests) that need to seed the authenticated key record without
+// depending on Middleware's private context key string.
+func SetKeyRecord(c *gin.Context, rec storage.KeyRecord) {
+	c.Set(contextKeyRecord, rec)
+}

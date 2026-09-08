@@ -102,6 +102,22 @@ func TestMiddlewareShouldReturn401WhenKeyUnknown(t *testing.T) {
 	}
 }
 
+func TestSetKeyRecordShouldMakeRecordRetrievableViaKeyRecordFromContext(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	c, _ := gin.CreateTestContext(httptest.NewRecorder())
+	want := storage.KeyRecord{KeyID: "key_42"}
+
+	SetKeyRecord(c, want)
+	got, ok := KeyRecordFromContext(c)
+
+	if !ok {
+		t.Fatal("expected key record to be found")
+	}
+	if got.KeyID != want.KeyID {
+		t.Errorf("expected KeyID %q, got %q", want.KeyID, got.KeyID)
+	}
+}
+
 func TestMiddlewareShouldReturn401WhenKeyRevoked(t *testing.T) {
 	store := newFakeStore()
 	revokedAt := "2026-09-08T00:00:00Z"

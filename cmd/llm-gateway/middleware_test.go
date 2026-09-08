@@ -11,6 +11,7 @@ import (
 
 	"github.com/gin-gonic/gin"
 
+	"llm-gateway/internal/auth"
 	"llm-gateway/internal/ratelimit"
 	"llm-gateway/internal/storage"
 )
@@ -20,7 +21,7 @@ func TestRateLimitMiddlewareShouldReturn429WithRetryAfterWhenRPMExceeded(t *test
 	rl := ratelimit.New()
 	r := gin.New()
 	r.Use(func(c *gin.Context) {
-		c.Set(keyRecordContextKey, storage.KeyRecord{KeyID: "key_1", Limits: storage.Limits{RPM: 1, TPM: 100000}})
+		auth.SetKeyRecord(c, storage.KeyRecord{KeyID: "key_1", Limits: storage.Limits{RPM: 1, TPM: 100000}})
 		c.Next()
 	})
 	r.Use(rateLimitMiddleware(rl))
@@ -56,7 +57,7 @@ func newTokenLimitTestRouter(t *testing.T, limits storage.Limits) (*gin.Engine, 
 
 	r := gin.New()
 	r.Use(func(c *gin.Context) {
-		c.Set(keyRecordContextKey, storage.KeyRecord{KeyID: "key_1", Limits: limits})
+		auth.SetKeyRecord(c, storage.KeyRecord{KeyID: "key_1", Limits: limits})
 		c.Next()
 	})
 	r.Use(tokenLimitMiddleware(store))

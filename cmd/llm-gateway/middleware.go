@@ -12,17 +12,15 @@ import (
 	"github.com/gin-gonic/gin"
 
 	"llm-gateway/internal/apierror"
+	"llm-gateway/internal/auth"
 	"llm-gateway/internal/storage"
 	"llm-gateway/internal/tokenlimit"
 )
 
-// Gin context keys shared across middleware/handlers in this package.
-// keyRecordContextKey mirrors the key auth.Middleware would use, but is
-// re-declared here (rather than importing internal/auth's unexported key)
-// so tests in this package can seed the context directly; production
-// wiring uses auth.KeyRecordFromContext / auth.Middleware unchanged.
+// Gin context keys used by this package's own middleware/handlers (the
+// authenticated key record itself is read via auth.KeyRecordFromContext,
+// set by auth.Middleware).
 const (
-	keyRecordContextKey   = "auth.key_record"
 	requestMetaContextKey = "request.meta"
 	requestBodyContextKey = "request.body"
 )
@@ -42,11 +40,7 @@ type rateLimiter interface {
 }
 
 func keyRecordFromGinContext(c *gin.Context) storage.KeyRecord {
-	v, ok := c.Get(keyRecordContextKey)
-	if !ok {
-		return storage.KeyRecord{}
-	}
-	rec, _ := v.(storage.KeyRecord)
+	rec, _ := auth.KeyRecordFromContext(c)
 	return rec
 }
 
