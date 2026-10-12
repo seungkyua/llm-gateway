@@ -8,7 +8,7 @@ import (
 	"sync"
 	"time"
 
-	"llm-gateway/internal/storage"
+	"github.com/seungkyua/llm-gateway/internal/storage"
 )
 
 const window = time.Minute

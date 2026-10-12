@@ -6,7 +6,7 @@ import (
 	"testing"
 	"time"
 
-	"llm-gateway/internal/storage"
+	"github.com/seungkyua/llm-gateway/internal/storage"
 )
 
 func newTestStore(t *testing.T) storage.Store {

@@ -1,4 +1,4 @@
-module llm-gateway
+module github.com/seungkyua/llm-gateway
 
 go 1.25.0
 

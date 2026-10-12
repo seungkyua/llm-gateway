@@ -12,7 +12,7 @@ import (
 
 	"github.com/gin-gonic/gin"
 
-	"llm-gateway/internal/config"
+	"github.com/seungkyua/llm-gateway/internal/config"
 )
 
 func newMockVLLM(t *testing.T) *httptest.Server {

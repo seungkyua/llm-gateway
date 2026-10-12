@@ -7,7 +7,7 @@ import (
 	"net/http"
 	"time"
 
-	"llm-gateway/internal/loadbalancer"
+	"github.com/seungkyua/llm-gateway/internal/loadbalancer"
 )
 
 // checkTimeout bounds a single backend health probe so one slow/hanging

@@ -11,9 +11,9 @@ import (
 
 	"github.com/gin-gonic/gin"
 
-	"llm-gateway/internal/auth"
-	"llm-gateway/internal/ratelimit"
-	"llm-gateway/internal/storage"
+	"github.com/seungkyua/llm-gateway/internal/auth"
+	"github.com/seungkyua/llm-gateway/internal/ratelimit"
+	"github.com/seungkyua/llm-gateway/internal/storage"
 )
 
 func TestRateLimitMiddlewareShouldReturn429WithRetryAfterWhenRPMExceeded(t *testing.T) {

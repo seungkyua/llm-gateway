@@ -11,10 +11,10 @@ import (
 
 	"github.com/gin-gonic/gin"
 
-	"llm-gateway/internal/apierror"
-	"llm-gateway/internal/auth"
-	"llm-gateway/internal/storage"
-	"llm-gateway/internal/tokenlimit"
+	"github.com/seungkyua/llm-gateway/internal/apierror"
+	"github.com/seungkyua/llm-gateway/internal/auth"
+	"github.com/seungkyua/llm-gateway/internal/storage"
+	"github.com/seungkyua/llm-gateway/internal/tokenlimit"
 )
 
 // Gin context keys used by this package's own middleware/handlers (the

@@ -13,7 +13,7 @@ import (
 
 	"github.com/gin-gonic/gin"
 
-	"llm-gateway/internal/loadbalancer"
+	"github.com/seungkyua/llm-gateway/internal/loadbalancer"
 )
 
 func newTestRouter(t *testing.T, backendURL string) *gin.Engine {

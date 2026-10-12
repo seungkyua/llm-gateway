@@ -7,7 +7,7 @@ import (
 	"testing"
 	"time"
 
-	"llm-gateway/internal/loadbalancer"
+	"github.com/seungkyua/llm-gateway/internal/loadbalancer"
 )
 
 func TestCheckOnceShouldMarkBackendHealthyWhenHealthEndpointSucceeds(t *testing.T) {

@@ -9,7 +9,7 @@ import (
 
 	"github.com/gin-gonic/gin"
 
-	"llm-gateway/internal/storage"
+	"github.com/seungkyua/llm-gateway/internal/storage"
 )
 
 func newTestRouter(t *testing.T) (*gin.Engine, *storage.FileStore) {

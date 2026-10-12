@@ -3,7 +3,7 @@ package ratelimit
 import (
 	"testing"
 
-	"llm-gateway/internal/storage"
+	"github.com/seungkyua/llm-gateway/internal/storage"
 )
 
 func TestAllowShouldReturnTrueWhenWithinLimits(t *testing.T) {

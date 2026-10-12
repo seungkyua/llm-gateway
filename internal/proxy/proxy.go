@@ -16,8 +16,8 @@ import (
 
 	"github.com/gin-gonic/gin"
 
-	"llm-gateway/internal/apierror"
-	"llm-gateway/internal/loadbalancer"
+	"github.com/seungkyua/llm-gateway/internal/apierror"
+	"github.com/seungkyua/llm-gateway/internal/loadbalancer"
 )
 
 const (

@@ -6,7 +6,7 @@ import (
 	"context"
 	"time"
 
-	"llm-gateway/internal/storage"
+	"github.com/seungkyua/llm-gateway/internal/storage"
 )
 
 const (

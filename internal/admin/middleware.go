@@ -7,7 +7,7 @@ import (
 
 	"github.com/gin-gonic/gin"
 
-	"llm-gateway/internal/apierror"
+	"github.com/seungkyua/llm-gateway/internal/apierror"
 )
 
 const bearerPrefix = "Bearer "

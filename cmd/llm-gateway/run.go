@@ -12,7 +12,7 @@ import (
 	"syscall"
 	"time"
 
-	"llm-gateway/internal/config"
+	"github.com/seungkyua/llm-gateway/internal/config"
 )
 
 // gracefulShutdownTimeout bounds how long in-flight requests (including

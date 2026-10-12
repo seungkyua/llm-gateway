@@ -10,17 +10,17 @@ import (
 
 	"github.com/gin-gonic/gin"
 
-	"llm-gateway/internal/admin"
-	"llm-gateway/internal/auth"
-	"llm-gateway/internal/config"
-	"llm-gateway/internal/healthcheck"
-	"llm-gateway/internal/loadbalancer"
-	"llm-gateway/internal/metrics"
-	"llm-gateway/internal/proxy"
-	"llm-gateway/internal/ratelimit"
-	"llm-gateway/internal/storage"
-	"llm-gateway/internal/tokencount"
-	"llm-gateway/internal/tokenlimit"
+	"github.com/seungkyua/llm-gateway/internal/admin"
+	"github.com/seungkyua/llm-gateway/internal/auth"
+	"github.com/seungkyua/llm-gateway/internal/config"
+	"github.com/seungkyua/llm-gateway/internal/healthcheck"
+	"github.com/seungkyua/llm-gateway/internal/loadbalancer"
+	"github.com/seungkyua/llm-gateway/internal/metrics"
+	"github.com/seungkyua/llm-gateway/internal/proxy"
+	"github.com/seungkyua/llm-gateway/internal/ratelimit"
+	"github.com/seungkyua/llm-gateway/internal/storage"
+	"github.com/seungkyua/llm-gateway/internal/tokencount"
+	"github.com/seungkyua/llm-gateway/internal/tokenlimit"
 )
 
 // healthCheckFailureThreshold is the number of consecutive health-check
