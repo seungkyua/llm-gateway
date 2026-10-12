@@ -53,6 +53,10 @@ make vet    # go vet ./...
    ./bin/llm-gateway-darwin-arm64 --config ./config.yaml
    # 또는
    LLM_GATEWAY_CONFIG=./config.yaml ./bin/llm-gateway-darwin-arm64
+
+   # 혹은
+   export ADMIN_TOKEN="a-strong-random-secret"
+   go run ./cmd/llm-gateway --config ./config.yaml
    ```
 
    설정 파일 경로 우선순위: `--config` 플래그 > `LLM_GATEWAY_CONFIG`
@@ -102,6 +106,37 @@ curl http://localhost:8080/admin/keys \
 curl -X DELETE http://localhost:8080/admin/keys/key_9f1c2a \
   -H "Authorization: Bearer $ADMIN_TOKEN"
 ```
+
+### 어떤 제한에도 걸리지 않는(사실상 무제한) Key 발급
+
+llm-gateway에는 "무제한"을 뜻하는 별도 값(예: `0`, `-1`)이 없습니다. 오히려
+`rpm: 0`처럼 0을 주면 **즉시 모든 요청이 차단**됩니다(`internal/ratelimit`이
+`현재 카운트 >= limits.RPM`으로 비교하기 때문에 한도가 0이면 항상 초과 상태).
+따라서 "무제한"은 **실질적으로 절대 도달하지 않을 만큼 큰 값**을 지정해서
+구현합니다:
+
+```bash
+curl -X POST http://localhost:8080/admin/keys \
+  -H "Authorization: Bearer $ADMIN_TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "name": "unlimited-key",
+    "rpm": 1000000000,
+    "tpm": 1000000000,
+    "max_tokens_per_request": 1000000,
+    "quota_period": "monthly",
+    "quota_tokens": 1000000000000
+  }'
+```
+
+- `rpm`/`tpm`: 분당 10억 — 어떤 실사용 트래픽도 이 값을 넘지 않습니다.
+- `max_tokens_per_request`: 100만 — 어떤 모델의 `max_tokens`보다도 큽니다.
+- `quota_tokens`: 1조(월간) — 사실상 소진 불가능한 양입니다.
+- `name`만 필수이고 나머지 필드를 생략하면 `config.yaml`의
+  `rate_limit.default`/`token_limit.default` 값이 대신 적용되므로, 반드시
+  위처럼 모든 한도 필드를 명시적으로 큰 값으로 지정해야 합니다.
+- 요청/응답 형식은 위 "Key 발급"과 동일하며, 평문 `key`는 이 응답에서만
+  노출됩니다.
 
 ## 클라이언트 사용 예시 (OpenAI SDK 호환)
 
