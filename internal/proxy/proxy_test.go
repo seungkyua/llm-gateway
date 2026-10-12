@@ -1,0 +1,410 @@
+package proxy
+
+import (
+	"bufio"
+	"bytes"
+	"encoding/json"
+	"net"
+	"net/http"
+	"net/http/httptest"
+	"strings"
+	"testing"
+	"time"
+
+	"github.com/gin-gonic/gin"
+
+	"llm-gateway/internal/loadbalancer"
+)
+
+func newTestRouter(t *testing.T, backendURL string) *gin.Engine {
+	t.Helper()
+	gin.SetMode(gin.TestMode)
+
+	var lb *loadbalancer.LoadBalancer
+	if backendURL == "" {
+		lb = loadbalancer.New(nil, &loadbalancer.RoundRobinHealthcheck{})
+	} else {
+		b := loadbalancer.NewBackend(backendURL)
+		b.SetStatus(loadbalancer.Healthy)
+		lb = loadbalancer.New([]*loadbalancer.Backend{b}, &loadbalancer.RoundRobinHealthcheck{})
+	}
+
+	p := New(lb, &http.Client{})
+	r := gin.New()
+	r.POST("/v1/chat/completions", p.Handler())
+	return r
+}
+
+func TestHandlerShouldRelayResponseBodyUnchangedWhenBackendRespondsNormally(t *testing.T) {
+	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusOK)
+		w.Write([]byte(`{"id":"chatcmpl-1","choices":[{"message":{"content":"hi"}}]}`))
+	}))
+	defer backend.Close()
+	r := newTestRouter(t, backend.URL)
+
+	req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", bytes.NewBufferString(`{"model":"m","messages":[]}`))
+	w := httptest.NewRecorder()
+	r.ServeHTTP(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", w.Code, w.Body.String())
+	}
+	if !strings.Contains(w.Body.String(), "chatcmpl-1") {
+		t.Errorf("expected backend body to be relayed unchanged, got %s", w.Body.String())
+	}
+}
+
+func TestHandlerShouldReturn503WhenNoBackendAvailable(t *testing.T) {
+	r := newTestRouter(t, "")
+
+	req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", bytes.NewBufferString(`{"model":"m"}`))
+	w := httptest.NewRecorder()
+	r.ServeHTTP(w, req)
+
+	if w.Code != http.StatusServiceUnavailable {
+		t.Fatalf("expected 503, got %d", w.Code)
+	}
+	var resp map[string]map[string]string
+	json.Unmarshal(w.Body.Bytes(), &resp)
+	if resp["error"]["code"] != "no_available_backend" {
+		t.Errorf("expected no_available_backend, got %v", resp["error"])
+	}
+}
+
+func TestHandlerShouldRelayBackend5xxStatusAndBodyUnchanged(t *testing.T) {
+	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusInternalServerError)
+		w.Write([]byte(`{"error":"backend exploded"}`))
+	}))
+	defer backend.Close()
+	r := newTestRouter(t, backend.URL)
+
+	req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", bytes.NewBufferString(`{"model":"m"}`))
+	w := httptest.NewRecorder()
+	r.ServeHTTP(w, req)
+
+	if w.Code != http.StatusInternalServerError {
+		t.Fatalf("expected 500 passed through, got %d", w.Code)
+	}
+	if !strings.Contains(w.Body.String(), "backend exploded") {
+		t.Errorf("expected backend error body relayed unchanged, got %s", w.Body.String())
+	}
+}
+
+func TestHandlerShouldReturn502WhenBackendRespondsWithEmptyBody(t *testing.T) {
+	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer backend.Close()
+	r := newTestRouter(t, backend.URL)
+
+	req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", bytes.NewBufferString(`{"model":"m"}`))
+	w := httptest.NewRecorder()
+	r.ServeHTTP(w, req)
+
+	if w.Code != http.StatusBadGateway {
+		t.Fatalf("expected 502, got %d: %s", w.Code, w.Body.String())
+	}
+	var resp map[string]map[string]string
+	json.Unmarshal(w.Body.Bytes(), &resp)
+	if resp["error"]["code"] != "bad_gateway" {
+		t.Errorf("expected bad_gateway, got %v", resp["error"])
+	}
+}
+
+func TestHandlerShouldReturn502WhenBackendRespondsWithHTML(t *testing.T) {
+	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/html")
+		w.WriteHeader(http.StatusOK)
+		w.Write([]byte("<html><body>Bad Gateway</body></html>"))
+	}))
+	defer backend.Close()
+	r := newTestRouter(t, backend.URL)
+
+	req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", bytes.NewBufferString(`{"model":"m"}`))
+	w := httptest.NewRecorder()
+	r.ServeHTTP(w, req)
+
+	if w.Code != http.StatusBadGateway {
+		t.Fatalf("expected 502, got %d: %s", w.Code, w.Body.String())
+	}
+}
+
+func TestHandlerShouldRelayAllSSEChunksAndSetEventStreamContentTypeWhenStreaming(t *testing.T) {
+	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		w.WriteHeader(http.StatusOK)
+		flusher := w.(http.Flusher)
+		for i := 0; i < 3; i++ {
+			w.Write([]byte("data: {\"chunk\":" + string(rune('0'+i)) + "}\n\n"))
+			flusher.Flush()
+		}
+	}))
+	defer backend.Close()
+	r := newTestRouter(t, backend.URL)
+
+	req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", bytes.NewBufferString(`{"model":"m","stream":true}`))
+	w := httptest.NewRecorder()
+	r.ServeHTTP(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", w.Code, w.Body.String())
+	}
+	if ct := w.Header().Get("Content-Type"); !strings.Contains(ct, "text/event-stream") {
+		t.Errorf("expected text/event-stream content type, got %q", ct)
+	}
+	chunkCount := strings.Count(w.Body.String(), "data: {\"chunk\":")
+	if chunkCount != 3 {
+		t.Errorf("expected 3 chunks relayed, got %d: %s", chunkCount, w.Body.String())
+	}
+}
+
+func TestHandlerShouldInvokeOnCompleteWithResponseDetailsWhenNonStreaming(t *testing.T) {
+	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusOK)
+		w.Write([]byte(`{"id":"chatcmpl-1","usage":{"prompt_tokens":10,"completion_tokens":5}}`))
+	}))
+	defer backend.Close()
+
+	b := loadbalancer.NewBackend(backend.URL)
+	b.SetStatus(loadbalancer.Healthy)
+	lb := loadbalancer.New([]*loadbalancer.Backend{b}, &loadbalancer.RoundRobinHealthcheck{})
+
+	var got Result
+	p := New(lb, &http.Client{}, WithOnComplete(func(c *gin.Context, r Result) {
+		got = r
+	}))
+	r := gin.New()
+	r.POST("/v1/chat/completions", p.Handler())
+
+	req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", bytes.NewBufferString(`{"model":"m"}`))
+	w := httptest.NewRecorder()
+	r.ServeHTTP(w, req)
+
+	if got.Status != http.StatusOK {
+		t.Errorf("expected onComplete Status 200, got %d", got.Status)
+	}
+	if got.Stream {
+		t.Error("expected Stream=false for non-streaming response")
+	}
+	if !strings.Contains(string(got.ResponseBody), "chatcmpl-1") {
+		t.Errorf("expected onComplete ResponseBody to contain response, got %s", got.ResponseBody)
+	}
+	if got.BackendURL != backend.URL {
+		t.Errorf("expected BackendURL %q, got %q", backend.URL, got.BackendURL)
+	}
+}
+
+func TestHandlerShouldInvokeOnCompleteWithChunkTimesWhenStreaming(t *testing.T) {
+	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		w.WriteHeader(http.StatusOK)
+		flusher := w.(http.Flusher)
+		for i := 0; i < 3; i++ {
+			w.Write([]byte("data: {}\n\n"))
+			flusher.Flush()
+		}
+	}))
+	defer backend.Close()
+
+	b := loadbalancer.NewBackend(backend.URL)
+	b.SetStatus(loadbalancer.Healthy)
+	lb := loadbalancer.New([]*loadbalancer.Backend{b}, &loadbalancer.RoundRobinHealthcheck{})
+
+	var got Result
+	p := New(lb, &http.Client{}, WithOnComplete(func(c *gin.Context, r Result) {
+		got = r
+	}))
+	r := gin.New()
+	r.POST("/v1/chat/completions", p.Handler())
+
+	req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", bytes.NewBufferString(`{"model":"m","stream":true}`))
+	w := httptest.NewRecorder()
+	r.ServeHTTP(w, req)
+
+	if !got.Stream {
+		t.Error("expected Stream=true for streaming response")
+	}
+	if len(got.ChunkTimes) != 3 {
+		t.Errorf("expected 3 chunk arrival times, got %d", len(got.ChunkTimes))
+	}
+}
+
+// TestHandlerShouldSendErrorEventAfterPartialChunksWhenConnectionDropsMidStream
+// uses a raw TCP listener (rather than httptest.Server) so we can hijack and
+// abruptly close the connection mid-response, simulating a backend crash
+// during streaming.
+func TestHandlerShouldSendErrorEventAfterPartialChunksWhenConnectionDropsMidStream(t *testing.T) {
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("failed to listen: %v", err)
+	}
+	go func() {
+		conn, err := ln.Accept()
+		if err != nil {
+			return
+		}
+		defer conn.Close()
+		// Drain the request headers/body (best effort).
+		reader := bufio.NewReader(conn)
+		for {
+			line, err := reader.ReadString('\n')
+			if err != nil || line == "\r\n" {
+				break
+			}
+		}
+		conn.Write([]byte("HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nTransfer-Encoding: chunked\r\n\r\n"))
+		conn.Write([]byte("1e\r\ndata: {\"chunk\":0}\n\n\r\n"))
+		time.Sleep(20 * time.Millisecond)
+		// Abruptly close without a terminating zero-length chunk, simulating
+		// a backend crash mid-stream.
+	}()
+	backendURL := "http://" + ln.Addr().String()
+	defer ln.Close()
+
+	r := newTestRouter(t, backendURL)
+
+	req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", bytes.NewBufferString(`{"model":"m","stream":true}`))
+	w := httptest.NewRecorder()
+
+	done := make(chan struct{})
+	go func() {
+		r.ServeHTTP(w, req)
+		close(done)
+	}()
+
+	select {
+	case <-done:
+	case <-time.After(5 * time.Second):
+		t.Fatal("handler did not return after backend connection dropped (possible hang)")
+	}
+
+	if !strings.Contains(w.Body.String(), "chunk\":0") {
+		t.Errorf("expected partial chunk to be preserved, got %s", w.Body.String())
+	}
+	if !strings.Contains(w.Body.String(), "error") {
+		t.Errorf("expected an error event to terminate the stream, got %s", w.Body.String())
+	}
+}
+
+// TestHandlerShouldSendErrorEventWhenBackendGracefullyClosesWithIncompleteEventBuffered
+// covers spec.md 인수 기준 19's second disconnect scenario: the backend does
+// not RST, it closes the connection normally (plain net.Conn.Close, a
+// graceful FIN) while an SSE event is still incomplete in the buffer (no
+// closing blank line). The gateway must treat this the same as a hard
+// disconnect: relay what was already sent, then terminate with an error
+// event, not silently return the incomplete bytes as if they were a
+// complete final event.
+func TestHandlerShouldSendErrorEventWhenBackendGracefullyClosesWithIncompleteEventBuffered(t *testing.T) {
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("failed to listen: %v", err)
+	}
+	go func() {
+		conn, err := ln.Accept()
+		if err != nil {
+			return
+		}
+		defer conn.Close()
+		reader := bufio.NewReader(conn)
+		for {
+			line, err := reader.ReadString('\n')
+			if err != nil || line == "\r\n" {
+				break
+			}
+		}
+		// No Content-Length / no chunked encoding: the body is delimited
+		// by the connection closing (Connection: close), same as a real
+		// server whose process exits normally mid-response.
+		conn.Write([]byte("HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nConnection: close\r\n\r\n"))
+		conn.Write([]byte("data: {\"chunk\":0}\n\n"))
+		conn.Write([]byte("data: {\"chunk\":1}")) // no trailing blank line: incomplete
+		// conn.Close() below is a plain, graceful close (no SO_LINGER
+		// trick) -> a FIN, not an RST.
+	}()
+	backendURL := "http://" + ln.Addr().String()
+	defer ln.Close()
+
+	r := newTestRouter(t, backendURL)
+
+	req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", bytes.NewBufferString(`{"model":"m","stream":true}`))
+	w := httptest.NewRecorder()
+
+	done := make(chan struct{})
+	go func() {
+		r.ServeHTTP(w, req)
+		close(done)
+	}()
+
+	select {
+	case <-done:
+	case <-time.After(5 * time.Second):
+		t.Fatal("handler did not return after backend gracefully closed mid-event (possible hang)")
+	}
+
+	if !strings.Contains(w.Body.String(), "chunk\":0") {
+		t.Errorf("expected the complete first chunk to be preserved, got %s", w.Body.String())
+	}
+	if !strings.Contains(w.Body.String(), "event: error") {
+		t.Errorf("expected an error event when the connection closed with an incomplete buffered event, got %s", w.Body.String())
+	}
+}
+
+// TestHandlerShouldTerminateNormallyWithoutErrorEventWhenBackendClosesAfterCompleteFinalEvent
+// covers the opposite side of 인수 기준 19: if the backend sends a complete,
+// properly-delimited final event (e.g. "[DONE]") and only then closes the
+// connection normally, that is a clean stream end and must NOT produce an
+// error event.
+func TestHandlerShouldTerminateNormallyWithoutErrorEventWhenBackendClosesAfterCompleteFinalEvent(t *testing.T) {
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("failed to listen: %v", err)
+	}
+	go func() {
+		conn, err := ln.Accept()
+		if err != nil {
+			return
+		}
+		defer conn.Close()
+		reader := bufio.NewReader(conn)
+		for {
+			line, err := reader.ReadString('\n')
+			if err != nil || line == "\r\n" {
+				break
+			}
+		}
+		conn.Write([]byte("HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nConnection: close\r\n\r\n"))
+		conn.Write([]byte("data: {\"chunk\":0}\n\n"))
+		conn.Write([]byte("data: [DONE]\n\n")) // complete, properly terminated
+	}()
+	backendURL := "http://" + ln.Addr().String()
+	defer ln.Close()
+
+	r := newTestRouter(t, backendURL)
+
+	req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", bytes.NewBufferString(`{"model":"m","stream":true}`))
+	w := httptest.NewRecorder()
+
+	done := make(chan struct{})
+	go func() {
+		r.ServeHTTP(w, req)
+		close(done)
+	}()
+
+	select {
+	case <-done:
+	case <-time.After(5 * time.Second):
+		t.Fatal("handler did not return after backend closed cleanly (possible hang)")
+	}
+
+	if !strings.Contains(w.Body.String(), "[DONE]") {
+		t.Errorf("expected the [DONE] event to be relayed, got %s", w.Body.String())
+	}
+	if strings.Contains(w.Body.String(), "event: error") {
+		t.Errorf("expected no error event when the backend sent a complete final event before closing, got %s", w.Body.String())
+	}
+}

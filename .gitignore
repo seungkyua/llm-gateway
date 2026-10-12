@@ -1,0 +1,7 @@
+/data/
+/logs/
+config.yaml
+/bin/
+*.log
+.DS_Store
+/llm-gateway
